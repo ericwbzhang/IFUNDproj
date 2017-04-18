@@ -1,0 +1,534 @@
+---
+title: ""
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+  rmdformats::readthedown:
+    highlight: kate
+---
+
+
+```{r knitr_init, echo=FALSE, cache=FALSE}
+library(knitr)
+library(rmdformats)
+
+## Global options
+options(max.print="75")
+opts_chunk$set(echo=FALSE,
+	             cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+```
+
+
+```{r include=FALSE}
+
+
+#
+
+require(xts)
+require(TTR)
+require(roll)
+# set wd
+homedir<- "/Users/Eric/Documents/IFUND_comp"
+datadir<- "/Users/Eric/Documents/IFUND_comp/data"
+setwd(homedir)
+
+load("U_train.RData")
+load("U_test.RData")
+
+
+##
+betaExposure<- function(portf, UniverseBeta){ # portf: list; UniverseBeta: df
+  tmp<- as.data.frame(unlist(portf, use.names = T))
+  colnames(tmp)<- 'weight'
+  tmp<- merge( tmp, UniverseBeta, by= 0, all.x=T)
+  return(sum(tmp$weight* tmp$Beta, na.rm=T))
+  
+  
+}
+
+
+portfConst<- function( UniverseNames, weights){
+  res<- list()
+  for ( c in UniverseNames){
+    if( c %in% names(weights)) {
+      res[[c]]<- as.numeric(weights[c])
+    }else  res[[c]]<-0
+  }
+  
+  return(res)
+  
+}
+
+portfRet<- function( Universe, portf, betahedge= F, INDX, UniverseBeta){ # Universe: list; portf: list
+  tmp<- list()
+  for ( x in names(Universe)){
+    tmp[[x]]<- Universe[[x]]$RET.CC.1 * portf[[x]]
+  }
+  tmp<- as.data.frame(tmp)
+  tmp<- apply(tmp, 1, sum)
+  tmp<- xts(tmp, order.by = as.Date(index(Universe[[1]])))
+  if( betahedge){
+    beta<- betaExposure(portf, UniverseBeta)
+    tmp<- tmp- beta* INDX$RET.CC.1
+    
+  }
+  
+  return(tmp)
+  
+}
+
+ret2value<- function(ret){ # ret: xts
+  value<- rep(0, length(ret))
+  tmp<-1
+  for (i in 1: length(value)){
+    if(! is.na(ret[i])){
+      value[i]<- tmp* (1+ ret[i])
+    }else{
+      value[i]<- tmp
+    }
+    tmp<- value[i]
+    
+  }
+  return(xts(value, order.by = as.Date(index(ret))))
+}
+
+
+## work over liquid Universal (in sample daily AMOUT median > 5e5)
+
+tmp<- sapply(U_train, function(x) median(x$AMOUNT))> 5e5
+U_train_liq<- U_train[tmp]
+liq_name<- names(U_train_liq)
+U_test_liq<- U_test[liq_name]
+
+
+
+U_train_liq.Vol.1<- data.frame(unlist(lapply(U_train_liq, function(x) sd(x$RET.CC.1, na.rm = T)), use.names = T))
+colnames(U_train_liq.Vol.1)<- "Vol"
+U_train_liq.iVol.1<- as.data.frame(unlist(lapply(U_train_liq, function(x) sd(x$RET.CO.1, na.rm = T)), use.names = T))
+colnames(U_train_liq.iVol.1)<- "iVol"
+U_train_liq.oVol.1<- as.data.frame(unlist(lapply(U_train_liq, function(x) sd(x$RET.OC.1, na.rm = T)), use.names = T))
+colnames(U_train_liq.oVol.1)<- "oVol"
+U_train_liq.ioCor.1<-as.data.frame(unlist( lapply(U_train_liq, function(x) as.numeric(cor(x$RET.CO.1, x$RET.OC.1, method = "spearman", use= "complete.obs"))), use.names = T))
+colnames(U_train_liq.ioCor.1)<- "ioCor"
+
+UTrainLiqVol<- cbind(U_train_liq.iVol.1,
+                     U_train_liq.oVol.1,
+                     U_train_liq.Vol.1,
+                     U_train_liq.ioCor.1)
+UTrainLiqVol$Names<- as.character(rownames(UTrainLiqVol))
+UTrainLiqVolPtle<-as.data.frame( apply( UTrainLiqVol, 2, FUN = function(x) rank(as.numeric(x))/ (dim(UTrainLiqVol)[1])))
+UTrainLiqVolPtle$Names<- UTrainLiqVol$Names
+rownames(UTrainLiqVolPtle)<- rownames(UTrainLiqVol)
+
+# overnight and intrday vol contribution
+
+
+
+
+flag1<- UTrainLiqVolPtle$Vol< 0.25
+flag2<- UTrainLiqVolPtle$Vol> 0.75 #& UTrainLiqVolPtle$Vol< 0.8
+
+
+flag1Names<- as.character(UTrainLiqVolPtle[flag1, ]$Names)
+flag2Names<- as.character(UTrainLiqVolPtle[flag2, ]$Names)
+a<- rep(1/ length(flag1Names), length(flag1Names))
+names(a)<- flag1Names
+b<- rep(1/ length(flag2Names), length(flag2Names))
+names(b)<- flag2Names
+w<- a
+
+
+
+# # low vol and high vol
+# U_train_liq_IO$lowVolFlag<- U_train_liq_IO$U_train_liq.Vol.1.orderPct< 0.25
+# U_train_liq_IO$highVolFlag<- U_train_liq_IO$U_train_liq.Vol.1.orderPct>0.75
+# 
+# lvNames<- U_train_liq_IO[U_train_liq_IO$lowVolFlag, ]$Names
+# hvNames<- U_train_liq_IO[U_train_liq_IO$highVolFlag,]$Names
+# lvWeights<- rep(1/ length(lvNames), length(lvNames))
+# names(lvWeights)<- as.character(lvNames)
+# hvWeights<- -rep(1/ length(hvNames), length(hvNames))
+# names(hvWeights)<- as.character(hvNames)
+# 
+# 
+# 
+# a<- U_train_liq_IO$U_train_liq.oVol.1.orderPct< 0.25 & U_train_liq_IO$U_train_liq.Vol.1.orderPct<0.5
+# b<- U_train_liq_IO$U_train_liq.oVol.1.orderPct>0.75 &  U_train_liq_IO$U_train_liq.Vol.1.orderPct>0.5
+# 
+# longNames<- as.character(U_train_liq_IO[a, ]$Names)
+# shortNames<- as.character(U_train_liq_IO[b,]$Names)
+# longs<- rep(1/ length(longNames), length(longNames))
+# shorts<- rep(-1/length(shortNames), length(shortNames))
+# names(longs)<- longNames
+# names(shorts)<- shortNames
+# 
+# 
+
+## test 
+## 
+
+
+load( "INDX_EQW.RData")
+INDX_EQW$AMOUNT_ema15<- EMA(INDX_EQW$AMOUNT, n = 15)
+INDX_EQW$AMOUNT_ema60<- EMA(INDX_EQW$AMOUNT, n= 60)
+INDX_EQW$AMOUNT_ema15g60<- ifelse( INDX_EQW$AMOUNT_ema15> INDX_EQW$AMOUNT_ema60, 1, -1)
+
+
+
+INDX_EQW$VALUE<- ret2value(INDX_EQW$RET.CC.1)
+INDX_EQW$VOLUME<- INDX_EQW$AMOUNT/ INDX_EQW$VALUE
+INDX_EQW$sd50<- runSD(x = INDX_EQW$RET.CC.1, n = 50)
+INDX_EQW$signedlogVolume<- log(INDX_EQW$VOLUME)* sign(INDX_EQW$RET.CC.1)
+INDX_EQW$signedsd50<- INDX_EQW$sd50* sign(INDX_EQW$RET.CC.1)
+INDX_EQW$signedsd50logVolume<- INDX_EQW$sd50* INDX_EQW$signedlogVolume
+INDX_EQW$lag5signedlogVolume<- lag(INDX_EQW$signedlogVolume, k = 5)
+INDX_EQW$lag10signedlogVolume<- lag(INDX_EQW$signedlogVolume, k=10)
+INDX_EQW$ma30signedlogVolume<- runMean(INDX_EQW$signedlogVolume, n = 30)
+INDX_EQW$lag5ma30signedlogVolume<- lag(INDX_EQW$ma30signedlogVolume, k = 5)
+INDX_EQW$lag5signedsd50<- lag(INDX_EQW$signedsd50, k = 5)
+
+
+split_flag= as.Date('2016-01-01')
+INDX_EQW_train<- INDX_EQW[ index(INDX_EQW)<  split_flag, ]
+INDX_EQW_test<- INDX_EQW[index(INDX_EQW)>  split_flag, ]
+
+UTrainLiqBeta<- as.data.frame(unlist( lapply(U_train_liq, FUN= function(x) as.numeric(lm(x$RET.CC.1~ INDX_EQW_train$RET.CC.1)$coef[2] )), use.names = T))
+colnames(UTrainLiqBeta)<- "Beta"
+
+portf_a<- portfConst( UniverseNames = names(U_train_liq), a)
+portfBeta_a<- betaExposure(portf_a, UTrainLiqBeta)
+
+portfret_a<- portfRet(Universe = U_test_liq, portf = portf_a, betahedge = T, INDX = INDX_EQW_test, UniverseBeta = UTrainLiqBeta )
+portfValue_a<- ret2value(portfret_a)
+summary(portfret_a)
+plot(portfValue_a)
+
+
+portf_b<- portfConst( UniverseNames = names(U_train_liq), b)
+portfBeta_b<- betaExposure(portf_b, UTrainLiqBeta)
+
+portfret_b<- portfRet(Universe = U_test_liq, portf = portf_b, betahedge = T, INDX = INDX_EQW_test, UniverseBeta = UTrainLiqBeta )
+portfValue_b<- ret2value(portfret_b)
+summary(portfret_b)
+plot(portfValue_b)
+
+
+
+tmp.1<- cbind( INDX_EQW_test$AMOUNT_ema15g60, portfret_a, portfret_b)
+colnames(tmp.1)<- c("flag", "portfret_a", 'portfret_b')
+tmp.1$portfret_c<- as.numeric(apply( tmp.1, 1, function(x) ifelse(is.na(x[1]), NA, ifelse(x[1]>0 , x[3], x[2] ))))
+
+portfret_c<- tmp.1$portfret_c
+summary(tmp.1)
+
+plot(ret2value(portfret_c))
+plot(ret2value(INDX_EQW_test$RET.CC.1))
+
+portf_d<- portfConst(UniverseNames = names(U_train_liq), c(a, -b))
+portfret_d<- portfRet(Universe =  U_train_liq, portf = portf_d, betahedge = T, INDX = INDX_EQW_train, UniverseBeta = UTrainLiqBeta)
+
+
+
+
+```
+
+
+
+# Volatility Factor In China Euqity Market
+
+## A simple portfolio 
+### Data
+All stocks(3000+) listed in China A share mkt on 2016-12-30. Each has OHLC and `Volume` and `Amount` (Cash Volume).
+
+
+### Universe
+
+We thinning the world.
+
+Criteria: 
+
+1. Select stocks that have full history (traded from 2014-01-01 to 2016-12-30) 
+
++ Then there are (2400+ ) stocks remaining. We build a mkt equal weight index `INDX_EQW` at this level, and use it as hedge if any.
+
+2. Cut the whole database into _train_ and _test_. 
+
++ _train_: 2014-01-01 -- 2015-12-31
++ _test_ : 2016-01-01 -- 2016-12-30
+
+3. We play over the liquid world. Based on the _train_ dataset, screen out stocks that have median of daily `AMOUNT` less than half billion CNY. 
+
+__Now there are 104 stocks remaining. Welcome to the liquid playgroud! __
+
+### Assumption 
+
+Volatility has positive return over US/EURO equity market. One explanation is that institutions prefer low vol stock due to tight risk budget. So a _long low vol/short high vol_ portfolio has unexplained (by mkt) positive return. 
+
+__Does it apply to China Equity Mkt? __
+
+
+### Portfolio
+
+Due to the short ban, it is hard to short single stocks. The portfolio implements the long and hedge out mkt beta by `INDX_EQW`
+
+__Portfolio P1__:
+
++ long: stocks in the first quartile of return std deviation (computation bases on _train_ dataset)
++ short: stocks in the last quartile of return std deviation
++ hedge: neutralize the mkt beta by `INDX_EQW` (beta estimation is based on _train_ dataset)
+
+
+The _long _ names and weights  (equal weight): 
+
+``` {r echo=T}
+w<- c(a, -b)
+print(w)
+
+```
+
+Beta of _long_ and _short_:
+
+```{r echo =T}
+
+portf_a<- portfConst( UniverseNames = names(U_train_liq), a)
+portfBeta_a<- betaExposure(portf_a, UTrainLiqBeta)
+
+print(portfBeta_a)
+
+portf_b<- portfConst( UniverseNames = names(U_train_liq), b)
+portfBeta_b<- betaExposure(portf_b, UTrainLiqBeta)
+
+print(portfBeta_b)
+
+
+```
+
+One can neutralize the beta by `INDX_EQW`
+
+
+### Performance
+
+For stake of simplicity, we hold staic portfilio. 
+
+The in-sample performance. 
+
+```{r echo=T}
+
+portf_d<- portfConst( UniverseNames = names(U_train_liq), w)
+portfBeta_d<- betaExposure(portf_d, UTrainLiqBeta)
+
+portfret_d<- portfRet(Universe = U_train_liq, portf = portf_d, betahedge = T, INDX = INDX_EQW_train, UniverseBeta = UTrainLiqBeta )
+portfValue_d<- ret2value(portfret_d)
+summary(portfret_d)
+
+plot(ret2value(portfret_d))
+plot(INDX_EQW_train$VALUE)
+```
+
+
+
+P1 fails to match the index, especially in the period 2014-11 -- 2015- 07. Timing is necessary.
+
+
+## Volatility and Risk Appetite 
+
+As metioned above, volatility facotr return comes from risk aversion. But the mkt is not always risk averse. Timing should be applied. 
+
+#### Intuition
+
+_When the mkt is a safe heaven, investors loosens risk budget and tends to play risk. Then low vol premium (low vol/high vol portfolio return) is negative. _
+
+_When the mkt is tight, safety, ie low volatility, has highest priority. _
+
+## Volatility: Timing is the Key
+
+#### Vol Timing Factor: Amount/Volume and Volatility
+
+Intuition indicates 2 factors: Volume and Volatility 
+
+Note: 
+
+1. The dataset doesnot have a mktwise volume entry. I use the `INDX_EQW` hypothetical volume (AMOUNT/VALUE) instead.
+
+2. Chinese mkt does not have an indicator like `VIX`. The proxy I use is `INDX_EQW` 50d rolling std div. 
+
+```{r echo= T}
+lm.1<- lm(portfret_d~ INDX_EQW_train$RET.CC.1+ log(INDX_EQW_train$VOLUME)+ INDX_EQW_train$sd50)
+
+summary(lm.1)
+
+```
+
+Seems like the hedge is effective. `RET.CC.1` is not relevant to the low vol premium. 
+
+
+__IDEA:  Volume and Volatility should have double effect-- explosion can happen both when mkt is overheaded or in panic-- so direction should be introduced.__
+
+
+``` {r echo= T}
+
+lm.2<- lm(portfret_d~ INDX_EQW_train$signedlogVolume+ INDX_EQW_train$sd50)
+
+summary(lm.2)
+
+```
+
+Here is the magic
+
+``` {r echo= T}
+
+lm.3<- lm(portfret_d~ INDX_EQW_train$signedlogVolume+ INDX_EQW_train$signedsd50+ INDX_EQW_train$signedsd50logVolume)
+
+summary(lm.3)
+
+```
+
+Seems like `signedVolume` dominates.
+
+Here is the majestic: 
+
+
+``` {r echo= T}
+
+lm.4<- lm(portfret_d~ INDX_EQW_train$signedlogVolume+ INDX_EQW_train$ma30signedlogVolume+ INDX_EQW_train$signedsd50)
+
+summary(lm.4)
+
+cor(cbind(INDX_EQW_train$signedlogVolume, INDX_EQW_train$ma30signedlogVolume, INDX_EQW_train$signedsd50), use= 'complete.obs')
+
+
+lm.4<- lm(portfret_d~ INDX_EQW_train$signedlogVolume+ INDX_EQW_train$ma30signedlogVolume+ INDX_EQW_train$sd50)
+
+summary(lm.4)
+
+cor(cbind(INDX_EQW_train$signedlogVolume, INDX_EQW_train$ma30signedlogVolume, INDX_EQW_train$sd50), use= 'complete.obs')
+
+```
+
+
+Consider the lag version: 
+
+``` {r echo= T}
+
+lm.5<- lm(portfret_d~ INDX_EQW_train$lag5signedlogVolume+  INDX_EQW_train$lag5ma30signedlogVolume)
+
+summary(lm.5)
+
+cor(INDX_EQW_train$lag5signedlogVolume, INDX_EQW_train$lag5ma30signedlogVolume, use= 'complete.obs')
+```
+
+
+_Conclusion:_
+
+_Low Vol premium is highly related to `signedlogVolume` and `signedsd50`, even with respect to the lag of moving average smoothed version._
+
+#### More to Go
+
+Other Potential Factors: 
+
+Limit-up Ceiling
+
+Limit-down Floor
+
+Intraday Floor-Ceiling dynamics
+
+Implied Vol forecasting (China VIX)
+
+......
+
+
+
+#### The Full Model 
+
+
+Just as many other factors, the factor return of low vol depends over the market regime. One systametic approach to dynamic factor rotation strategies  is a _Market Regime Switch Model_. 
+
+
+##### Market Regime Switch: Probablity Graphic Approach
+
+Markov Graph: Different Market status, Status may transfer. The transition is described by a transition matrix. One optimal factor portfolio should be held if one does not have a forecasting power to the forward mkt status. The optimal factor portfolio can be a start point of a multi factor rotation strategy. 
+
+
+##### Some adhoc ways
+
+ML approach: SVM classification. RF ?? 
+
+
+
+## Way to Go
+
+The problems: 
+
+1. Beta estimation
+
+Dynamic beta hedge is not employed. The portfolio does have beta exposure though not significant. 
+
+
+2. Vol estimtion
+
+Intuitively, Volatility should have extra info to the vol premium. An accurate estimation and forecasting of mkt realized vol may help (For how, check  http://rpubs.com/ericwbzhang/217044 ) 
+
+Some info from the implied vol may boost portfolio performance. 
+
+3. More signal introduced to forecast vol premium.  
+
+eg. Celling and Floor.
+
+4. The Full Modell: Market Regime Switch 
+
+
+5. The Value of PM
+
+Factor is employed by many professional investors since it is understandable, which means forecastable for seasoned practioners. PMs with alpha should have a forecasting power over the forward mkt status. The role a quant may play is to reveal what happens in a clear way. 
+
+
+## Show-off
+
+I dont have much time to do a bar-by-bar out of sample backtesting. (Note that what I have done is purely over 2014-2015 dataset, the 2016 test set is not touched. ) While a quick guess may be good enough.
+
+
+
+```{r echo= T}
+plot(INDX_EQW_test$VALUE)
+
+plot(INDX_EQW_test$sd50)
+
+plot(INDX_EQW_test$VOLUME)
+plot(INDX_EQW_train$VOLUME)
+
+```
+
+
+__Recall `lm.4`: Vol premium is positive when mkt is weak and mild, ie. the bar is short and volmue is gradually expanding-- this is what happens during 2016.__
+
+__One could make a guess that the vol premium during 2016 should be decent (different from the trivial performance in 2014-2015), and the beginning may suffer a mild drawdown. __
+
+See what actually happens: 
+
+``` {r echo=T}
+
+portf_e<- portfConst(UniverseNames = names(U_train_liq), c(a, -b))
+portfret_e<- portfRet(Universe =  U_test_liq, portf = portf_e, betahedge = T, INDX = INDX_EQW_test, UniverseBeta = UTrainLiqBeta)
+
+portfValue_e<- ret2value(portfret_e)
+
+plot(portfValue_e)
+
+summary(portfret_e)
+
+
+# Sharpe Ratio
+mean(portfret_e, na.rm=T)/ sd(portfret_e, na.rm = T)*16
+
+
+
+
+```
+
+
